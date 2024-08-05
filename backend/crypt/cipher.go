@@ -57,7 +57,7 @@ var (
 	ErrorNotAMultipleOfBlocksize = errors.New("not a multiple of blocksize")
 	ErrorTooShortAfterDecode     = errors.New("too short after base32 decode")
 	ErrorTooLongAfterDecode      = errors.New("too long after base32 decode")
-	ErrorEncryptedFileTooShort   = errors.New("file is too short to be encrypted")
+	ErrorEncryptedFileTooShort   = errors.New("file is too short to be decrypted")
 	ErrorEncryptedFileBadHeader  = errors.New("file has truncated block header")
 	ErrorEncryptedCekInvalid     = errors.New("file encryption key is invalid")
 	ErrorEncryptedBadMagic       = errors.New("not an encrypted file - bad magic string")
@@ -908,10 +908,32 @@ func (c *Cipher) newDecrypter(rc io.ReadCloser) (*decrypter, error) {
 		readBuf: c.getBlock(),
 		limit:   -1,
 	}
-	// Read file header (magic + nonce)
-	readBuf := (*fh.readBuf)[:c.getFileHeaderSize()]
+
+	// Read magic bytes to determine cipher version is used to configure valid decryption method
+	magicBuf := (*fh.readBuf)[:fileMagicSize] // Technically we need to read the longest of (fileMagicSize and fileMagicSizeV2), but in this case both are the same size, so for simplicity we use: `fileMagicSize`
+	nMagic, err := readers.ReadFill(fh.rc, magicBuf)
+
+	isMagicHeader := bytes.Equal(magicBuf[:fileMagicSize], fileMagicBytes)
+	isMagicHeaderV2 := bytes.Equal(magicBuf[:fileMagicSizeV2], fileMagicBytesV2)
+	if !isMagicHeader && !isMagicHeaderV2 {
+		return nil, fh.finishAndClose(ErrorEncryptedBadMagic)
+	}
+
+	if isMagicHeader {
+		c.setCipherVersion(CipherVersionV1)
+		fh.cek = fh.c.dataKey
+	}
+
+	if isMagicHeaderV2 {
+		c.setCipherVersion(CipherVersionV2)
+	}
+
+	// Read remaining part of the header: `nonce` (for V1) or `nonce` and `cek` (for V2)
+	readBuf := (*fh.readBuf)[:c.getFileHeaderSize()-nMagic]
 	n, err := readers.ReadFill(fh.rc, readBuf)
-	if n < c.getFileHeaderSize() && err == io.EOF {
+
+	totalBytesRead := nMagic + n
+	if totalBytesRead < c.getFileHeaderSize() && err == io.EOF {
 		// This read from 0..fileHeaderSize-1 bytes
 		return nil, fh.finishAndClose(ErrorEncryptedFileTooShort)
 	} else if err != io.EOF && err != nil {
@@ -919,19 +941,10 @@ func (c *Cipher) newDecrypter(rc io.ReadCloser) (*decrypter, error) {
 	}
 	// check the magic
 
-	isMagicHeader := bytes.Equal(readBuf[:c.getFileMagicSize()], c.getFileMagicBytes())
-	if !isMagicHeader {
-		return nil, fh.finishAndClose(ErrorEncryptedBadMagic)
-	}
-
-	nonceStart := c.getFileMagicSize()
-	nonceEnd := c.getFileMagicSize() + c.getFileNonceSize()
+	nonceStart := 0
+	nonceEnd := c.getFileNonceSize()
 
 	fh.nonce.fromBuf(readBuf[nonceStart:nonceEnd], c.getFileNonceSize()) // retrieve the nonce
-
-	if c.version == CipherVersionV1 {
-		fh.cek = fh.c.dataKey
-	}
 
 	if c.version == CipherVersionV2 {
 		var wrappedCek wrappedCek
@@ -1272,10 +1285,16 @@ func (c *Cipher) EncryptedSize(size int64) int64 {
 
 // DecryptedSize calculates the size of the data when decrypted
 func (c *Cipher) DecryptedSize(size int64) (int64, error) {
-	size -= int64(c.getFileHeaderSize())
-	if size < 0 {
+	size -= int64(c.getFileHeaderSize()) // WARNING: DecryptedSize might return invalid value before `newDecrypter()` is called if V2 cipher is enabled and user tries to read V1 object. Eventually `newDecrypter()` will be called, which will then call: `setCipherVersion()` which would then configure: `getFileHeaderSize()` effectively making subsequent calls to `DecryptedSize()` return exact value.
+	if c.version == CipherVersionV1 && size < 0 {
 		return 0, ErrorEncryptedFileTooShort
 	}
+
+	sizeDiff := int64(fileHeaderSize - fileHeaderSizeV2) // If V2 cipher is enabled and V1 object is read then `size` will be negative before `setCipherVersion()` is being called.
+	if c.version == CipherVersionV2 && size < sizeDiff {
+		return 0, ErrorEncryptedFileTooShort
+	}
+
 	blocks, residue := size/blockSize, size%blockSize
 	decryptedSize := blocks * blockDataSize
 	if residue != 0 {

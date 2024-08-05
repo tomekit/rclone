@@ -174,7 +174,7 @@ when the path length is critical.`,
 		},
 			{
 				Name:    "cipher_version",
-				Help:    `Choose cipher version. All files within crypt must be encrypted using single version only.`,
+				Help:    `Choose cipher version. This applies to newly written objects. Rclone will detect cipher version for existing objects when reading.`,
 				Default: CipherVersionV1,
 				Examples: []fs.OptionExample{
 					{
