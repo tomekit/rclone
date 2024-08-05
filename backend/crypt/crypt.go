@@ -171,7 +171,24 @@ Setting suffix to "none" will result in an empty suffix. This may be useful
 when the path length is critical.`,
 			Default:  ".bin",
 			Advanced: true,
-		}},
+		},
+			{
+				Name:    "cipher_version",
+				Help:    `Choose cipher version. All files within crypt must be encrypted using single version only.`,
+				Default: CipherVersionV1,
+				Examples: []fs.OptionExample{
+					{
+						Value: CipherVersionV1,
+						Help:  "File contents encrypted using same master key. ",
+					},
+					{
+						Value: CipherVersionV2,
+						Help:  "Each file contents encrypted using separate encryption key (40 bytes overhead). Truncation protection.",
+					},
+				},
+				Advanced: true,
+			},
+		},
 	})
 }
 
@@ -205,6 +222,7 @@ func newCipherForConfig(opt *Options) (*Cipher, error) {
 	}
 	cipher.setEncryptedSuffix(opt.Suffix)
 	cipher.setPassBadBlocks(opt.PassBadBlocks)
+	cipher.setCipherVersion(opt.CipherVersion)
 	return cipher, nil
 }
 
@@ -310,6 +328,7 @@ type Options struct {
 	FilenameEncoding        string `config:"filename_encoding"`
 	Suffix                  string `config:"suffix"`
 	StrictNames             bool   `config:"strict_names"`
+	CipherVersion           string `config:"cipher_version"`
 }
 
 // Fs represents a wrapped fs.Fs
@@ -465,7 +484,7 @@ func (f *Fs) put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options [
 	ci := fs.GetConfig(ctx)
 
 	if f.opt.NoDataEncryption {
-		o, err := put(ctx, in, f.newObjectInfo(src, nonce{}), options...)
+		o, err := put(ctx, in, f.newObjectInfo(src, nonce{}, cek{}), options...)
 		if err == nil && o != nil {
 			o = f.newObject(o)
 		}
@@ -500,7 +519,7 @@ func (f *Fs) put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options [
 	}
 
 	// Transfer the data
-	o, err := put(ctx, wrappedIn, f.newObjectInfo(src, encrypter.nonce), options...)
+	o, err := put(ctx, wrappedIn, f.newObjectInfo(src, encrypter.nonce, encrypter.cek), options...)
 	if err != nil {
 		return nil, err
 	}
@@ -691,7 +710,7 @@ func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, 
 	if err != nil {
 		return nil, err
 	}
-	o, err := do(ctx, wrappedIn, f.newObjectInfo(src, encrypter.nonce))
+	o, err := do(ctx, wrappedIn, f.newObjectInfo(src, encrypter.nonce, encrypter.cek))
 	if err != nil {
 		return nil, err
 	}
@@ -748,7 +767,7 @@ func (f *Fs) DecryptFileName(encryptedFileName string) (string, error) {
 // src with it, and calculates the hash given by HashType on the fly
 //
 // Note that we break lots of encapsulation in this function.
-func (f *Fs) computeHashWithNonce(ctx context.Context, nonce nonce, src fs.Object, hashType hash.Type) (hashStr string, err error) {
+func (f *Fs) computeHashWithNonce(ctx context.Context, nonce nonce, cek cek, src fs.Object, hashType hash.Type) (hashStr string, err error) {
 	// Open the src for input
 	in, err := src.Open(ctx)
 	if err != nil {
@@ -757,7 +776,7 @@ func (f *Fs) computeHashWithNonce(ctx context.Context, nonce nonce, src fs.Objec
 	defer fs.CheckClose(in, &err)
 
 	// Now encrypt the src with the nonce
-	out, err := f.cipher.newEncrypter(in, &nonce)
+	out, err := f.cipher.newEncrypter(in, &nonce, &cek)
 	if err != nil {
 		return "", fmt.Errorf("failed to make encrypter: %w", err)
 	}
@@ -786,7 +805,7 @@ func (f *Fs) ComputeHash(ctx context.Context, o *Object, src fs.Object, hashType
 
 	// Read the nonce - opening the file is sufficient to read the nonce in
 	// use a limited read so we only read the header
-	in, err := o.Object.Open(ctx, &fs.RangeOption{Start: 0, End: int64(fileHeaderSize) - 1})
+	in, err := o.Object.Open(ctx, &fs.RangeOption{Start: 0, End: int64(f.cipher.getFileHeaderSize()) - 1})
 	if err != nil {
 		return "", fmt.Errorf("failed to open object to read nonce: %w", err)
 	}
@@ -797,6 +816,8 @@ func (f *Fs) ComputeHash(ctx context.Context, o *Object, src fs.Object, hashType
 	}
 	nonce := d.nonce
 	// fs.Debugf(o, "Read nonce % 2x", nonce)
+
+	cek := d.cek
 
 	// Check nonce isn't all zeros
 	isZero := true
@@ -815,7 +836,7 @@ func (f *Fs) ComputeHash(ctx context.Context, o *Object, src fs.Object, hashType
 		return "", fmt.Errorf("failed to close nonce read: %w", err)
 	}
 
-	return f.computeHashWithNonce(ctx, nonce, src, hashType)
+	return f.computeHashWithNonce(ctx, nonce, cek, src, hashType)
 }
 
 // MergeDirs merges the contents of all the directories passed
@@ -1109,13 +1130,15 @@ type ObjectInfo struct {
 	fs.ObjectInfo
 	f     *Fs
 	nonce nonce
+	cek   cek
 }
 
-func (f *Fs) newObjectInfo(src fs.ObjectInfo, nonce nonce) *ObjectInfo {
+func (f *Fs) newObjectInfo(src fs.ObjectInfo, nonce nonce, cek cek) *ObjectInfo {
 	return &ObjectInfo{
 		ObjectInfo: src,
 		f:          f,
 		nonce:      nonce,
+		cek:        cek,
 	}
 }
 
@@ -1160,7 +1183,7 @@ func (o *ObjectInfo) Hash(ctx context.Context, hash hash.Type) (string, error) {
 	if srcObj.Fs().Features().IsLocal {
 		// Read the data and encrypt it to calculate the hash
 		fs.Debugf(o, "Computing %v hash of encrypted source", hash)
-		return o.f.computeHashWithNonce(ctx, o.nonce, srcObj, hash)
+		return o.f.computeHashWithNonce(ctx, o.nonce, o.cek, srcObj, hash)
 	}
 	return "", nil
 }

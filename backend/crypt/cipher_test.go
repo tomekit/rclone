@@ -734,24 +734,24 @@ func TestNoncePointer(t *testing.T) {
 func TestNonceFromReader(t *testing.T) {
 	var x nonce
 	buf := bytes.NewBufferString("123456789abcdefghijklmno")
-	err := x.fromReader(buf)
+	err := x.fromReader(buf, fileNonceSize)
 	assert.NoError(t, err)
 	assert.Equal(t, nonce{'1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o'}, x)
 	buf = bytes.NewBufferString("123456789abcdefghijklmn")
-	err = x.fromReader(buf)
+	err = x.fromReader(buf, fileNonceSize)
 	assert.EqualError(t, err, "short read of nonce: EOF")
 }
 
 func TestNonceFromBuf(t *testing.T) {
 	var x nonce
 	buf := []byte("123456789abcdefghijklmnoXXXXXXXX")
-	x.fromBuf(buf)
+	x.fromBuf(buf, fileNonceSize)
 	assert.Equal(t, nonce{'1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o'}, x)
 	buf = []byte("0123456789abcdefghijklmn")
-	x.fromBuf(buf)
+	x.fromBuf(buf, fileNonceSize)
 	assert.Equal(t, nonce{'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n'}, x)
 	buf = []byte("0123456789abcdefghijklm")
-	assert.Panics(t, func() { x.fromBuf(buf) })
+	assert.Panics(t, func() { x.fromBuf(buf, fileNonceSize) })
 }
 
 func TestNonceIncrement(t *testing.T) {
@@ -1083,7 +1083,7 @@ func testEncryptDecrypt(t *testing.T, bufSize int, copySize int64) {
 	c.cryptoRand = &zeroes{} // zero out the nonce
 	buf := make([]byte, bufSize)
 	source := newRandomSource(copySize)
-	encrypted, err := c.newEncrypter(source, nil)
+	encrypted, err := c.newEncrypter(source, nil, nil)
 	assert.NoError(t, err)
 	decrypted, err := c.newDecrypter(io.NopCloser(encrypted))
 	assert.NoError(t, err)
@@ -1177,14 +1177,14 @@ func TestNewEncrypter(t *testing.T) {
 
 	z := &zeroes{}
 
-	fh, err := c.newEncrypter(z, nil)
+	fh, err := c.newEncrypter(z, nil, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, nonce{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18}, fh.nonce)
 	assert.Equal(t, []byte{'R', 'C', 'L', 'O', 'N', 'E', 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18}, (*fh.buf)[:32])
 
 	// Test error path
 	c.cryptoRand = bytes.NewBufferString("123456789abcdefghijklmn")
-	fh, err = c.newEncrypter(z, nil)
+	fh, err = c.newEncrypter(z, nil, nil)
 	assert.Nil(t, fh)
 	assert.EqualError(t, err, "short read of nonce: EOF")
 }
@@ -1196,7 +1196,7 @@ func TestNewEncrypterErrUnexpectedEOF(t *testing.T) {
 	assert.NoError(t, err)
 
 	in := &readers.ErrorReader{Err: io.ErrUnexpectedEOF}
-	fh, err := c.newEncrypter(in, nil)
+	fh, err := c.newEncrypter(in, nil, nil)
 	assert.NoError(t, err)
 
 	n, err := io.CopyN(io.Discard, fh, 1e6)
@@ -1477,7 +1477,7 @@ func TestDecrypterCalculateUnderlying(t *testing.T) {
 		{blockDataSize + 1, blockDataSize + 1, int64(fileHeaderSize) + blockSize, 2 * blockSize, 1, 1},
 	} {
 		what := fmt.Sprintf("offset = %d, limit = %d", test.offset, test.limit)
-		underlyingOffset, underlyingLimit, discard, blocks := calculateUnderlying(test.offset, test.limit)
+		underlyingOffset, underlyingLimit, discard, blocks := calculateUnderlying(test.offset, test.limit, fileHeaderSize)
 		assert.Equal(t, test.wantOffset, underlyingOffset, what)
 		assert.Equal(t, test.wantLimit, underlyingLimit, what)
 		assert.Equal(t, test.wantDiscard, discard, what)
