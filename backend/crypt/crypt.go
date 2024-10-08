@@ -908,7 +908,7 @@ func (f *Fs) getDecrypter(ctx context.Context, o *Object, overrideCek *cek) (*de
 	if err != nil {
 		return nil, fmt.Errorf("failed to open object to read nonce: %w", err)
 	}
-	d, err := f.cipher.newDecrypter(in, overrideCek, o)
+	d, err := f.cipher.newDecrypter(in, overrideCek)
 	if err != nil {
 		_ = in.Close()
 		return nil, fmt.Errorf("failed to open object to read nonce: %w", err)
@@ -1282,7 +1282,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (rc io.Read
 		}
 	}
 
-	rc, err = o.f.cipher.DecryptDataSeek(ctx, o, func(ctx context.Context, underlyingOffset, underlyingLimit int64) (io.ReadCloser, error) {
+	rc, err = o.f.cipher.DecryptDataSeek(ctx, func(ctx context.Context, underlyingOffset, underlyingLimit int64) (io.ReadCloser, error) {
 		if underlyingOffset == 0 && underlyingLimit < 0 {
 			// Open with no seek
 			return o.Object.Open(ctx, openOptions...)

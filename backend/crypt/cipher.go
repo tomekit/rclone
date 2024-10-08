@@ -951,7 +951,7 @@ type decrypter struct {
 }
 
 // newDecrypter creates a new file handle decrypting on the fly
-func (c *Cipher) newDecrypter(rc io.ReadCloser, customCek *cek, o *Object) (*decrypter, error) {
+func (c *Cipher) newDecrypter(rc io.ReadCloser, customCek *cek) (*decrypter, error) {
 	fh := &decrypter{
 		rc:      rc,
 		c:       c,
@@ -1031,7 +1031,7 @@ func (c *Cipher) newDecrypter(rc io.ReadCloser, customCek *cek, o *Object) (*dec
 }
 
 // newDecrypterSeek creates a new file handle decrypting on the fly
-func (c *Cipher) newDecrypterSeek(ctx context.Context, o *Object, open OpenRangeSeek, offset, limit int64, customCek *cek) (fh *decrypter, err error) {
+func (c *Cipher) newDecrypterSeek(ctx context.Context, open OpenRangeSeek, offset, limit int64, customCek *cek) (fh *decrypter, err error) {
 	var rc io.ReadCloser
 	doRangeSeek := false
 	setLimit := false
@@ -1053,7 +1053,7 @@ func (c *Cipher) newDecrypterSeek(ctx context.Context, o *Object, open OpenRange
 		return nil, err
 	}
 	// Open the stream which fills in the nonce
-	fh, err = c.newDecrypter(rc, customCek, o)
+	fh, err = c.newDecrypter(rc, customCek)
 	if err != nil {
 		return nil, err
 	}
@@ -1322,7 +1322,7 @@ func (fh *decrypter) finishAndClose(err error) error {
 
 // DecryptData decrypts the data stream
 func (c *Cipher) DecryptData(rc io.ReadCloser) (io.ReadCloser, error) {
-	out, err := c.newDecrypter(rc, nil, nil)
+	out, err := c.newDecrypter(rc, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1334,8 +1334,8 @@ func (c *Cipher) DecryptData(rc io.ReadCloser) (io.ReadCloser, error) {
 // The open function must return a ReadCloser opened to the offset supplied.
 //
 // You must use this form of DecryptData if you might want to Seek the file handle
-func (c *Cipher) DecryptDataSeek(ctx context.Context, o *Object, open OpenRangeSeek, offset, limit int64, customCek *cek) (ReadSeekCloser, error) {
-	out, err := c.newDecrypterSeek(ctx, o, open, offset, limit, customCek)
+func (c *Cipher) DecryptDataSeek(ctx context.Context, open OpenRangeSeek, offset, limit int64, customCek *cek) (ReadSeekCloser, error) {
+	out, err := c.newDecrypterSeek(ctx, open, offset, limit, customCek)
 	if err != nil {
 		return nil, err
 	}
