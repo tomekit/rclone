@@ -762,16 +762,17 @@ func (n *nonce) add(x uint64) {
 
 // encrypter encrypts an io.Reader on the fly
 type encrypter struct {
-	mu       sync.Mutex
-	in       io.Reader
-	cek      cek // File contents encryption key
-	c        *Cipher
-	nonce    nonce
-	buf      *[blockSize]byte
-	readBuf  *[blockSize]byte
-	bufIndex int
-	bufSize  int
-	err      error
+	mu           sync.Mutex
+	in           io.Reader
+	cek          cek // File contents encryption key
+	c            *Cipher
+	initialNonce nonce
+	nonce        nonce
+	buf          *[blockSize]byte
+	readBuf      *[blockSize]byte
+	bufIndex     int
+	bufSize      int
+	err          error
 }
 
 // newEncrypter creates a new file handle encrypting on the fly
@@ -792,6 +793,9 @@ func (c *Cipher) newEncrypter(in io.Reader, nonce *nonce, cek *cek) (*encrypter,
 			return nil, err
 		}
 	}
+
+	fh.initialNonce = fh.nonce // Save initial nonce, as `nonce` field gets incremented during run.
+
 	// Copy magic into buffer
 	copy((*fh.buf)[:], getFileMagicBytes(c.version))
 
@@ -903,18 +907,18 @@ func (c *Cipher) encryptData(in io.Reader, nonce *nonce, cek *cek) (io.Reader, *
 	}
 
 	wrappedIn, wrap := accounting.UnWrap(wrappedIn) // unwrap the accounting off the Reader
-	out, err := c.newEncrypter(wrappedIn, nonce, cek)
+	enc, err := c.newEncrypter(wrappedIn, nonce, cek)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	wrappedIn = wrap(out) // and wrap the accounting back on
+	wrappedIn = wrap(enc) // and wrap the accounting back on
 
 	if c.version == CipherVersionV2 {
-		wrappedIn = wrapReaderAppendPlaintextHash(wrappedIn, plaintextHasher, out)
+		wrappedIn = wrapReaderAppendPlaintextHash(wrappedIn, plaintextHasher, enc)
 	}
 
-	return wrappedIn, out, nil
+	return wrappedIn, enc, nil
 }
 
 // EncryptData encrypts the data stream
