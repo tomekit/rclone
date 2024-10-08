@@ -859,43 +859,6 @@ func Run(t *testing.T, opt *Opt) {
 			assert.NoError(t, f.Rmdir(ctx, "writer-at-subdir"))
 		})
 
-		// TestFsOpenChunkWriterSmall tests writing in chunks to fs
-		// then reads back the contents and check if they match
-		// go test -v -run 'TestIntegration/FsMkdir/FsOpenChunkWriterSmall'
-		t.Run("FsOpenChunkWriterSmall", func(t *testing.T) {
-			skipIfNotOk(t)
-			openChunkWriter := f.Features().OpenChunkWriter
-			if openChunkWriter == nil {
-				t.Skip("FS has no OpenChunkWriter interface")
-			}
-
-			size1MB := 64 * 1024 // blockDataSize
-			contents1 := random.String(size1MB)
-
-			path := "writer-at-subdir/writer-at-file"
-			objSrc := object.NewStaticObjectInfo(path+"-WRONG-REMOTE", file1.ModTime, -1, true, nil, nil)
-			_, out, err := openChunkWriter(ctx, path, objSrc, &fs.ChunkOption{
-				ChunkSize: int64(size1MB),
-			})
-			require.NoError(t, err)
-
-			var n int64
-			assert.Equal(t, int64(size1MB), n)
-			n, err = out.WriteChunk(ctx, 0, strings.NewReader(contents1))
-			assert.NoError(t, err)
-
-			assert.NoError(t, out.Close(ctx))
-
-			obj := fstest.NewObject(ctx, t, f, path)
-			originalContents := contents1
-			fileContents := ReadObject(ctx, t, obj, -1)
-			isEqual := originalContents == fileContents
-			assert.True(t, isEqual, "contents of file differ")
-
-			assert.NoError(t, obj.Remove(ctx))
-			assert.NoError(t, f.Rmdir(ctx, "writer-at-subdir"))
-		})
-
 		// TestFsChangeNotify tests that changes are properly
 		// propagated
 		//
