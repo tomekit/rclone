@@ -1203,6 +1203,7 @@ func TestNewEncrypterV2(t *testing.T) {
 
 	in := bytes.NewReader(plaintextToEncrypt)
 
+	// @TODO Use encryptData function instead
 	var preHasher *hash.MultiHasher
 	var wrappedIn io.Reader
 	if c.version == CipherVersionV2 {
@@ -1358,7 +1359,7 @@ func TestNewDecrypterErrUnexpectedEOF(t *testing.T) {
 }
 
 func TestNewDecrypterSeekLimit(t *testing.T) {
-	c, err := newCipherForTest(NameEncryptionStandard, "", "", true, nil)
+	c, err := newCipher(NameEncryptionStandard, "", "", true, nil, CipherVersionV1)
 	assert.NoError(t, err)
 	c.cryptoRand = &zeroes{} // nodge the crypto rand generator
 
@@ -1377,7 +1378,7 @@ func TestNewDecrypterSeekLimit(t *testing.T) {
 	trials := []int{0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65,
 		127, 128, 129, 255, 256, 257, 511, 512, 513, 1023, 1024, 1025, 2047, 2048, 2049,
 		4095, 4096, 4097, 8191, 8192, 8193, 16383, 16384, 16385, 32767, 32768, 32769,
-		65535, 65536, 65537, 131071, 131072, 131073, dataSize - 1, dataSize}
+		65534, 65535, 65536, 65537, 131071, 131072, 131073, dataSize - 1, dataSize}
 	limits := []int{-1, 0, 1, 65535, 65536, 65537, 131071, 131072, 131073}
 
 	// Open stream with a seek of underlyingOffset
@@ -1511,6 +1512,161 @@ func TestNewDecrypterSeekLimit(t *testing.T) {
 	}
 }
 
+// Clone of TestNewDecrypterSeekLimit with V2 cipher values
+func TestNewDecrypterSeekLimitV2(t *testing.T) {
+	c, err := newCipher(NameEncryptionStandard, "", "", true, nil, CipherVersionV2)
+	assert.NoError(t, err)
+	c.cryptoRand = &zeroes{} // nodge the crypto rand generator
+
+	// Make random data
+	const dataSize = 150000
+	plaintext, err := io.ReadAll(newRandomSource(dataSize))
+	assert.NoError(t, err)
+
+	// Encrypt the data
+	buf := bytes.NewBuffer(plaintext)
+	encrypted, err := c.EncryptData(buf)
+	assert.NoError(t, err)
+	ciphertext, err := io.ReadAll(encrypted)
+	assert.NoError(t, err)
+
+	trials := []int{0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65,
+		127, 128, 129, 255, 256, 257, 511, 512, 513, 1023, 1024, 1025, 2047, 2048, 2049,
+		4095, 4096, 4097, 8191, 8192, 8193, 16383, 16384, 16385, 32767, 32768, 32769,
+		65534, 65535, 65536, 65537, 131071, 131072, 131073, dataSize - 1, dataSize}
+	limits := []int{-1, 0, 1, 65535, 65536, 65537, 131071, 131072, 131073}
+
+	// Open stream with a seek of underlyingOffset
+	var reader io.ReadCloser
+	open := func(ctx context.Context, underlyingOffset, underlyingLimit int64) (io.ReadCloser, error) {
+		end := len(ciphertext)
+		if underlyingLimit >= 0 {
+			end = int(underlyingOffset + underlyingLimit)
+			if end > len(ciphertext) {
+				end = len(ciphertext)
+			}
+		}
+		reader = io.NopCloser(bytes.NewBuffer(ciphertext[int(underlyingOffset):end]))
+		return reader, nil
+	}
+
+	inBlock := make([]byte, dataSize)
+
+	// Check the seek worked by reading a block and checking it
+	// against what it should be
+	check := func(rc io.Reader, offset, limit int) {
+		n, err := io.ReadFull(rc, inBlock)
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			require.NoError(t, err)
+		}
+		seekedDecrypted := inBlock[:n]
+
+		what := fmt.Sprintf("offset = %d, limit = %d", offset, limit)
+		if limit >= 0 {
+			assert.Equal(t, limit, n, what)
+		}
+		require.Equal(t, plaintext[offset:offset+n], seekedDecrypted, what)
+
+		// We should have completely emptied the reader at this point
+		n, err = reader.Read(inBlock)
+		assert.Equal(t, io.EOF, err)
+		assert.Equal(t, 0, n)
+	}
+
+	// Now try decoding it with an open/seek
+	for _, offset := range trials {
+		for _, limit := range limits {
+			if offset+limit > len(plaintext) {
+				continue
+			}
+			rc, err := c.DecryptDataSeek(context.Background(), open, int64(offset), int64(limit), nil)
+			assert.NoError(t, err)
+
+			check(rc, offset, limit)
+		}
+	}
+
+	// Try decoding it with a single open and lots of seeks
+	fh, err := c.DecryptDataSeek(context.Background(), open, 0, -1, nil)
+	assert.NoError(t, err)
+	for _, offset := range trials {
+		for _, limit := range limits {
+			if offset+limit > len(plaintext) {
+				continue
+			}
+			_, err := fh.RangeSeek(context.Background(), int64(offset), io.SeekStart, int64(limit))
+			assert.NoError(t, err)
+
+			check(fh, offset, limit)
+		}
+	}
+
+	// Do some checks on the open callback
+	for _, test := range []struct {
+		offset, limit         int64
+		wantOffset, wantLimit int64
+	}{
+		// unlimited
+		{0, -1, int64(fileHeaderSizeV2), -1},
+		{1, -1, int64(fileHeaderSizeV2), -1},
+		{blockDataSize - 1, -1, int64(fileHeaderSizeV2), -1},
+		{blockDataSize, -1, int64(fileHeaderSizeV2) + blockSize, -1},
+		{blockDataSize + 1, -1, int64(fileHeaderSizeV2) + blockSize, -1},
+		// limit=1
+		{0, 1, int64(fileHeaderSizeV2), blockSize},
+		{1, 1, int64(fileHeaderSizeV2), blockSize},
+		{blockDataSize - 1, 1, int64(fileHeaderSizeV2), blockSize},
+		{blockDataSize, 1, int64(fileHeaderSizeV2) + blockSize, blockSize},
+		{blockDataSize + 1, 1, int64(fileHeaderSizeV2) + blockSize, blockSize},
+		// limit=100
+		{0, 100, int64(fileHeaderSizeV2), blockSize},
+		{1, 100, int64(fileHeaderSizeV2), blockSize},
+		{blockDataSize - 1, 100, int64(fileHeaderSizeV2), 2 * blockSize},
+		{blockDataSize, 100, int64(fileHeaderSizeV2) + blockSize, blockSize},
+		{blockDataSize + 1, 100, int64(fileHeaderSizeV2) + blockSize, blockSize},
+		// limit=blockDataSize-1
+		{0, blockDataSize - 1, int64(fileHeaderSizeV2), blockSize},
+		{1, blockDataSize - 1, int64(fileHeaderSizeV2), blockSize},
+		{blockDataSize - 1, blockDataSize - 1, int64(fileHeaderSizeV2), 2 * blockSize},
+		{blockDataSize, blockDataSize - 1, int64(fileHeaderSizeV2) + blockSize, blockSize},
+		{blockDataSize + 1, blockDataSize - 1, int64(fileHeaderSizeV2) + blockSize, blockSize},
+		// limit=blockDataSize
+		{0, blockDataSize, int64(fileHeaderSizeV2), blockSize},
+		{1, blockDataSize, int64(fileHeaderSizeV2), 2 * blockSize},
+		{blockDataSize - 1, blockDataSize, int64(fileHeaderSizeV2), 2 * blockSize},
+		{blockDataSize, blockDataSize, int64(fileHeaderSizeV2) + blockSize, blockSize},
+		{blockDataSize + 1, blockDataSize, int64(fileHeaderSizeV2) + blockSize, 2 * blockSize},
+		// limit=blockDataSize+1
+		{0, blockDataSize + 1, int64(fileHeaderSizeV2), 2 * blockSize},
+		{1, blockDataSize + 1, int64(fileHeaderSizeV2), 2 * blockSize},
+		{blockDataSize - 1, blockDataSize + 1, int64(fileHeaderSizeV2), 2 * blockSize},
+		{blockDataSize, blockDataSize + 1, int64(fileHeaderSizeV2) + blockSize, 2 * blockSize},
+		{blockDataSize + 1, blockDataSize + 1, int64(fileHeaderSizeV2) + blockSize, 2 * blockSize},
+	} {
+		what := fmt.Sprintf("offset = %d, limit = %d", test.offset, test.limit)
+		callCount := 0
+		testOpen := func(ctx context.Context, underlyingOffset, underlyingLimit int64) (io.ReadCloser, error) {
+			switch callCount {
+			case 0:
+				assert.Equal(t, int64(0), underlyingOffset, what)
+				assert.Equal(t, int64(-1), underlyingLimit, what)
+			case 1:
+				assert.Equal(t, test.wantOffset, underlyingOffset, what)
+				assert.Equal(t, test.wantLimit, underlyingLimit, what)
+			default:
+				t.Errorf("Too many calls %d for %s", callCount+1, what)
+			}
+			callCount++
+			return open(ctx, underlyingOffset, underlyingLimit)
+		}
+		fh, err := c.DecryptDataSeek(context.Background(), testOpen, 0, -1, nil)
+		assert.NoError(t, err)
+		gotOffset, err := fh.RangeSeek(context.Background(), test.offset, io.SeekStart, test.limit)
+		assert.NoError(t, err)
+		assert.Equal(t, gotOffset, test.offset)
+	}
+}
+
 func TestDecrypterCalculateUnderlying(t *testing.T) {
 	for _, test := range []struct {
 		offset, limit           int64
@@ -1556,6 +1712,59 @@ func TestDecrypterCalculateUnderlying(t *testing.T) {
 	} {
 		what := fmt.Sprintf("offset = %d, limit = %d", test.offset, test.limit)
 		underlyingOffset, underlyingLimit, discard, blocks := calculateUnderlying(test.offset, test.limit, fileHeaderSize)
+		assert.Equal(t, test.wantOffset, underlyingOffset, what)
+		assert.Equal(t, test.wantLimit, underlyingLimit, what)
+		assert.Equal(t, test.wantDiscard, discard, what)
+		assert.Equal(t, test.wantBlocks, blocks, what)
+	}
+}
+
+// Clone of TestDecrypterCalculateUnderlying
+func TestDecrypterCalculateUnderlyingV2(t *testing.T) {
+	for _, test := range []struct {
+		offset, limit           int64
+		wantOffset, wantLimit   int64
+		wantDiscard, wantBlocks int64
+	}{
+		// unlimited
+		{0, -1, int64(fileHeaderSizeV2), -1, 0, 0},
+		{1, -1, int64(fileHeaderSizeV2), -1, 1, 0},
+		{blockDataSize - 1, -1, int64(fileHeaderSizeV2), -1, blockDataSize - 1, 0},
+		{blockDataSize, -1, int64(fileHeaderSizeV2) + blockSize, -1, 0, 1},
+		{blockDataSize + 1, -1, int64(fileHeaderSizeV2) + blockSize, -1, 1, 1},
+		// limit=1
+		{0, 1, int64(fileHeaderSizeV2), blockSize, 0, 0},
+		{1, 1, int64(fileHeaderSizeV2), blockSize, 1, 0},
+		{blockDataSize - 1, 1, int64(fileHeaderSizeV2), blockSize, blockDataSize - 1, 0},
+		{blockDataSize, 1, int64(fileHeaderSizeV2) + blockSize, blockSize, 0, 1},
+		{blockDataSize + 1, 1, int64(fileHeaderSizeV2) + blockSize, blockSize, 1, 1},
+		// limit=100
+		{0, 100, int64(fileHeaderSizeV2), blockSize, 0, 0},
+		{1, 100, int64(fileHeaderSizeV2), blockSize, 1, 0},
+		{blockDataSize - 1, 100, int64(fileHeaderSizeV2), 2 * blockSize, blockDataSize - 1, 0},
+		{blockDataSize, 100, int64(fileHeaderSizeV2) + blockSize, blockSize, 0, 1},
+		{blockDataSize + 1, 100, int64(fileHeaderSizeV2) + blockSize, blockSize, 1, 1},
+		// limit=blockDataSize-1
+		{0, blockDataSize - 1, int64(fileHeaderSizeV2), blockSize, 0, 0},
+		{1, blockDataSize - 1, int64(fileHeaderSizeV2), blockSize, 1, 0},
+		{blockDataSize - 1, blockDataSize - 1, int64(fileHeaderSizeV2), 2 * blockSize, blockDataSize - 1, 0},
+		{blockDataSize, blockDataSize - 1, int64(fileHeaderSizeV2) + blockSize, blockSize, 0, 1},
+		{blockDataSize + 1, blockDataSize - 1, int64(fileHeaderSizeV2) + blockSize, blockSize, 1, 1},
+		// limit=blockDataSize
+		{0, blockDataSize, int64(fileHeaderSizeV2), blockSize, 0, 0},
+		{1, blockDataSize, int64(fileHeaderSizeV2), 2 * blockSize, 1, 0},
+		{blockDataSize - 1, blockDataSize, int64(fileHeaderSizeV2), 2 * blockSize, blockDataSize - 1, 0},
+		{blockDataSize, blockDataSize, int64(fileHeaderSizeV2) + blockSize, blockSize, 0, 1},
+		{blockDataSize + 1, blockDataSize, int64(fileHeaderSizeV2) + blockSize, 2 * blockSize, 1, 1},
+		// limit=blockDataSize+1
+		{0, blockDataSize + 1, int64(fileHeaderSizeV2), 2 * blockSize, 0, 0},
+		{1, blockDataSize + 1, int64(fileHeaderSizeV2), 2 * blockSize, 1, 0},
+		{blockDataSize - 1, blockDataSize + 1, int64(fileHeaderSizeV2), 2 * blockSize, blockDataSize - 1, 0},
+		{blockDataSize, blockDataSize + 1, int64(fileHeaderSizeV2) + blockSize, 2 * blockSize, 0, 1},
+		{blockDataSize + 1, blockDataSize + 1, int64(fileHeaderSizeV2) + blockSize, 2 * blockSize, 1, 1},
+	} {
+		what := fmt.Sprintf("offset = %d, limit = %d", test.offset, test.limit)
+		underlyingOffset, underlyingLimit, discard, blocks := calculateUnderlying(test.offset, test.limit, fileHeaderSizeV2)
 		assert.Equal(t, test.wantOffset, underlyingOffset, what)
 		assert.Equal(t, test.wantLimit, underlyingLimit, what)
 		assert.Equal(t, test.wantDiscard, discard, what)
