@@ -918,7 +918,7 @@ func (fh *encrypter) finish(err error) (int, error) {
 }
 
 // Encrypt data encrypts the data stream
-func (c *Cipher) encryptData(in io.Reader) (io.Reader, *encrypter, error) {
+func (c *Cipher) encryptData(in io.Reader, nonce *nonce, cek *cek) (io.Reader, *encrypter, error) {
 	var plaintextHasher *hash.MultiHasher
 	var wrappedIn io.Reader
 	var err error
@@ -932,7 +932,7 @@ func (c *Cipher) encryptData(in io.Reader) (io.Reader, *encrypter, error) {
 	}
 
 	wrappedIn, wrap := accounting.UnWrap(wrappedIn) // unwrap the accounting off the Reader
-	out, err := c.newEncrypter(wrappedIn, nil, nil)
+	out, err := c.newEncrypter(wrappedIn, nonce, cek)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -948,7 +948,7 @@ func (c *Cipher) encryptData(in io.Reader) (io.Reader, *encrypter, error) {
 
 // EncryptData encrypts the data stream
 func (c *Cipher) EncryptData(in io.Reader) (io.Reader, error) {
-	out, _, err := c.encryptData(in)
+	out, _, err := c.encryptData(in, nil, nil)
 	return out, err
 }
 

@@ -528,7 +528,7 @@ func (f *Fs) put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options [
 	}
 
 	// Encrypt the data into wrappedIn
-	wrappedIn, encrypter, err := f.cipher.encryptData(in)
+	wrappedIn, encrypter, err := f.cipher.encryptData(in, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -745,7 +745,7 @@ func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, 
 	if do == nil {
 		return nil, errors.New("can't PutUnchecked")
 	}
-	wrappedIn, encrypter, err := f.cipher.encryptData(in)
+	wrappedIn, encrypter, err := f.cipher.encryptData(in, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -815,20 +815,8 @@ func (f *Fs) computeHashWithNonce(ctx context.Context, nonce nonce, cek cek, src
 	}
 	defer fs.CheckClose(in, &err)
 
-	// @TODO wrapReaderCalculatePlaintextHash and wrapReaderAppendPlaintextHash logic is already included inside `encryptData` function. We should probably modify: `computeHashWithNonce` so it uses `encryptData`.
-	var plaintextHasher *hash.MultiHasher
-	var wrappedIn io.Reader
-	if f.cipher.version == CipherVersionV2 {
-		wrappedIn, plaintextHasher, err = wrapReaderCalculatePlaintextHash(in)
-		if err != nil {
-			return "", fmt.Errorf("failed to wrap the reader: %w", err)
-		}
-	} else {
-		wrappedIn = in
-	}
-
 	// Now encrypt the src with the nonce
-	out, err := f.cipher.newEncrypter(wrappedIn, &nonce, &cek)
+	out, _, err := f.cipher.encryptData(in, &nonce, &cek)
 	if err != nil {
 		return "", fmt.Errorf("failed to make encrypter: %w", err)
 	}
@@ -839,12 +827,6 @@ func (f *Fs) computeHashWithNonce(ctx context.Context, nonce nonce, cek cek, src
 		return "", fmt.Errorf("failed to make hasher: %w", err)
 	}
 	_, err = io.Copy(m, out)
-
-	if f.cipher.version == CipherVersionV2 { // Append hash to the end
-		emptyReader := bytes.NewReader([]byte{})
-		hashReader := wrapReaderAppendPlaintextHash(emptyReader, plaintextHasher, out)
-		_, err = io.Copy(m, hashReader)
-	}
 
 	if err != nil {
 		return "", fmt.Errorf("failed to hash data: %w", err)
