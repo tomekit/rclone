@@ -60,27 +60,12 @@ func testObjectInfo(t *testing.T, f *Fs, wrap bool) {
 	inBuf := bytes.NewBufferString(contents)
 	var outBuf bytes.Buffer
 
-	var preHasher *hash.MultiHasher
-	var wrappedIn io.Reader
-	if f.cipher.version == CipherVersionV2 {
-		wrappedIn, preHasher, _ = wrapReaderCalculatePlaintextHash(inBuf)
-	} else {
-		wrappedIn = inBuf
-	}
-
-	enc, err := f.cipher.newEncrypter(wrappedIn, nil, nil)
+	out, enc, err := f.cipher.encryptData(inBuf, nil, nil)
 	require.NoError(t, err)
-	nonce := enc.nonce // read the nonce at the start
+	_, err = io.Copy(&outBuf, out)
+
+	nonce := enc.initialNonce // read the nonce at the start
 	cek := enc.cek
-	_, err = io.Copy(&outBuf, enc)
-
-	if f.cipher.version == CipherVersionV2 { // Append hash to the end
-		emptyReader := bytes.NewReader([]byte{})
-		hashReader := wrapReaderAppendPlaintextHash(emptyReader, preHasher, enc)
-		_, err = io.Copy(&outBuf, hashReader)
-	}
-
-	require.NoError(t, err)
 
 	var oi fs.ObjectInfo = obj
 	if wrap {

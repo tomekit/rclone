@@ -555,7 +555,7 @@ func (f *Fs) put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options [
 	}
 
 	// Transfer the data
-	o, err := put(ctx, wrappedIn, f.newObjectInfo(src, encrypter.nonce, encrypter.cek), options...)
+	o, err := put(ctx, wrappedIn, f.newObjectInfo(src, encrypter.initialNonce, encrypter.cek), options...)
 	if err != nil {
 		return nil, err
 	}
@@ -749,7 +749,7 @@ func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, 
 	if err != nil {
 		return nil, err
 	}
-	o, err := do(ctx, wrappedIn, f.newObjectInfo(src, encrypter.nonce, encrypter.cek))
+	o, err := do(ctx, wrappedIn, f.newObjectInfo(src, encrypter.initialNonce, encrypter.cek))
 	if err != nil {
 		return nil, err
 	}
