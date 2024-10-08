@@ -70,7 +70,7 @@ func cryptDecode(cipher *crypt.Cipher, args []string) error {
 	output := ""
 
 	for _, encryptedFileName := range args {
-		fileName, err := cipher.DecryptFileName(encryptedFileName)
+		fileName, _, err := cipher.DecryptFileName(encryptedFileName)
 		if err != nil {
 			output += fmt.Sprintln(encryptedFileName, "\t", "Failed to decrypt")
 		} else {

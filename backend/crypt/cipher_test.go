@@ -434,17 +434,17 @@ func testStandardDecryptFileName(t *testing.T, encoding string, testCases []Enco
 	for _, test := range testCases {
 		// Test when dirNameEncrypt=true
 		c, _ := newCipherForTest(NameEncryptionStandard, "", "", true, enc)
-		actual, actualErr := c.DecryptFileName(test.in)
+		actual, actualErr := c.decryptFileNameForTest(test.in)
 		assert.NoError(t, actualErr)
 		assert.Equal(t, test.expected, actual)
 		if caseInsensitive {
 			c, _ := newCipherForTest(NameEncryptionStandard, "", "", true, enc)
-			actual, actualErr := c.DecryptFileName(strings.ToUpper(test.in))
+			actual, actualErr := c.decryptFileNameForTest(strings.ToUpper(test.in))
 			assert.NoError(t, actualErr)
 			assert.Equal(t, test.expected, actual)
 		}
 		// Add a character should raise ErrorNotAMultipleOfBlocksize
-		actual, actualErr = c.DecryptFileName(enc.EncodeToString([]byte("1")) + test.in)
+		actual, actualErr = c.decryptFileNameForTest(enc.EncodeToString([]byte("1")) + test.in)
 		assert.Equal(t, ErrorNotAMultipleOfBlocksize, actualErr)
 		assert.Equal(t, "", actual)
 		// Test when dirNameEncrypt=false
@@ -453,7 +453,7 @@ func testStandardDecryptFileName(t *testing.T, encoding string, testCases []Enco
 			noDirEncryptIn = test.expected[:strings.LastIndex(test.expected, "/")] + test.in[strings.LastIndex(test.in, "/"):]
 		}
 		c, _ = newCipherForTest(NameEncryptionStandard, "", "", false, enc)
-		actual, actualErr = c.DecryptFileName(noDirEncryptIn)
+		actual, actualErr = c.decryptFileNameForTest(noDirEncryptIn)
 		assert.NoError(t, actualErr)
 		assert.Equal(t, test.expected, actual)
 	}
@@ -513,7 +513,7 @@ func TestNonStandardDecryptFileName(t *testing.T) {
 			if test.customSuffix != "" {
 				c.setEncryptedSuffix(test.customSuffix)
 			}
-			actual, actualErr := c.DecryptFileName(test.in)
+			actual, actualErr := c.decryptFileNameForTest(test.in)
 			what := fmt.Sprintf("Testing %q (mode=%v)", test.in, test.mode)
 			assert.Equal(t, test.expected, actual, what)
 			assert.Equal(t, test.expectedErr, actualErr, what)
@@ -534,7 +534,7 @@ func TestEncDecMatches(t *testing.T) {
 			{NameEncryptionObfuscated, "Avatar The Last Airbender"},
 		} {
 			c, _ := newCipherForTest(test.mode, "", "", true, enc)
-			out, err := c.DecryptFileName(c.EncryptFileName(test.in))
+			out, err := c.decryptFileNameForTest(c.EncryptFileName(test.in))
 			what := fmt.Sprintf("Testing %q (mode=%v)", test.in, test.mode)
 			assert.Equal(t, out, test.in, what)
 			assert.Equal(t, err, nil, what)
@@ -1728,4 +1728,15 @@ func newCipherForTest(mode NameEncryptionMode, password, salt string, dirNameEnc
 	c, err := newCipher(mode, password, salt, dirNameEncrypt, enc, CipherVersionV1)
 	c.setEncryptedSuffix(fileEncryptedSuffix)
 	return c, err
+}
+
+// DecryptFileName decrypts a file path
+func (c *Cipher) decryptFileNameForTest(in string) (string, error) {
+
+	name, _, err := c.DecryptFileName(in)
+	if err != nil {
+		return "", err
+	}
+
+	return name, err
 }

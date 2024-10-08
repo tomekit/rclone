@@ -73,6 +73,11 @@ var ConfigOptionsInfo = Options{{
 	Help:     "Check for changes with size & checksum (if available, or fallback to size only)",
 	Groups:   "Copy",
 }, {
+	Name:    "force_migration_crypt_v1",
+	Default: false,
+	Help:    "Copies object even if mod_time and size the same, as long as it's V1. Useful to migrate all objects from V1 to V2",
+	Groups:  "Copy",
+}, {
 	Name:    "size_only",
 	Default: false,
 	Help:    "Skip based on size only, not modtime or checksum",
@@ -538,6 +543,7 @@ type ConfigInfo struct {
 	DryRun                     bool              `config:"dry_run"`
 	Interactive                bool              `config:"interactive"`
 	CheckSum                   bool              `config:"checksum"`
+	ForceMigrationCryptV1      bool              `config:"force_migration_crypt_v1"`
 	SizeOnly                   bool              `config:"size_only"`
 	IgnoreTimes                bool              `config:"ignore_times"`
 	IgnoreExisting             bool              `config:"ignore_existing"`

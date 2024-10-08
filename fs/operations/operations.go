@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rclone/rclone/backend/crypt"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/cache"
@@ -190,20 +191,22 @@ var checksumWarning sync.Once
 
 // options for equal function()
 type equalOpt struct {
-	sizeOnly          bool // if set only check size
-	checkSum          bool // if set check checksum+size instead of modtime+size
-	updateModTime     bool // if set update the modtime if hashes identical and checking with modtime+size
-	forceModTimeMatch bool // if set assume modtimes match
+	sizeOnly              bool // if set only check size
+	checkSum              bool // if set check checksum+size instead of modtime+size
+	updateModTime         bool // if set update the modtime if hashes identical and checking with modtime+size
+	forceModTimeMatch     bool // if set assume modtimes match
+	forceMigrationCryptV1 bool // if set will force copy the object if it's a V1 cipher version
 }
 
 // default set of options for equal()
 func defaultEqualOpt(ctx context.Context) equalOpt {
 	ci := fs.GetConfig(ctx)
 	return equalOpt{
-		sizeOnly:          ci.SizeOnly,
-		checkSum:          ci.CheckSum,
-		updateModTime:     !ci.NoUpdateModTime,
-		forceModTimeMatch: false,
+		sizeOnly:              ci.SizeOnly,
+		checkSum:              ci.CheckSum,
+		updateModTime:         !ci.NoUpdateModTime,
+		forceModTimeMatch:     false,
+		forceMigrationCryptV1: ci.ForceMigrationCryptV1,
 	}
 }
 
@@ -239,6 +242,26 @@ func WithEqualFn(ctx context.Context, equalFn EqualFn) context.Context {
 func equal(ctx context.Context, src fs.ObjectInfo, dst fs.Object, opt equalOpt) bool {
 	ci := fs.GetConfig(ctx)
 	logger, _ := GetLogger(ctx)
+
+	if opt.forceMigrationCryptV1 {
+		obj, isCrypt := src.(*crypt.Object)
+
+		if isCrypt {
+			cipherVersion, err := obj.GetCipherVersion()
+			if err != nil {
+				fs.Debugf(src, "Failed to get cipher version: %v", err)
+				logger(ctx, Differ, src, dst, nil)
+				return false
+			}
+
+			if cipherVersion == crypt.CipherVersionV1 {
+				fs.Debugf(src, "Forcing migration")
+				logger(ctx, Differ, src, dst, nil)
+				return false
+			}
+		}
+	}
+
 	if sizeDiffers(ctx, src, dst) {
 		fs.Debugf(src, "Sizes differ (src %d vs dst %d)", src.Size(), dst.Size())
 		logger(ctx, Differ, src, dst, nil)

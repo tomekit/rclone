@@ -43,6 +43,7 @@ const (
 	fileNonceSizeV2         = 23
 	fileReservedBytesV2Size = 4 // Make sure it matches the: `fileReservedBytesV2`
 	fileHeaderSizeV2        = fileMagicSizeV2 + fileNonceSizeV2 + fileWrappedCekSize + fileReservedBytesV2Size
+	fileEncryptedSuffixV2   = ".2.bin" // V2 cipher enforces specific suffix regardless of the name encryption setting or suffix configuration.
 	fileCekSize             = 32
 	fileWrappedCekSize      = fileCekSize + 8 // Some overhead of AES RFC 3394 Key Wrapping
 
@@ -209,7 +210,6 @@ type Cipher struct {
 	passBadBlocks   bool // if set passed bad blocks as zeroed blocks
 	encryptedSuffix string
 	version         string
-	exactSize       bool
 }
 
 // newCipher initialises the cipher.  If salt is "" then it uses a built in salt val
@@ -251,10 +251,6 @@ func (c *Cipher) setPassBadBlocks(passBadBlocks bool) {
 
 func (c *Cipher) setCipherVersion(cipherVersion string) {
 	c.version = cipherVersion
-}
-
-func (c *Cipher) setExactSize(exact bool) {
-	c.exactSize = exact
 }
 
 func getFileHeaderSize(cipherVersion string) int {
@@ -594,7 +590,13 @@ func (c *Cipher) EncryptFileName(in string) string {
 	if c.mode == NameEncryptionOff {
 		return in + c.encryptedSuffix
 	}
-	return c.encryptFileName(in)
+
+	encrypted := c.encryptFileName(in)
+	if c.version == CipherVersionV2 { // Force append the encryptedSuffix for V2
+		encrypted += c.encryptedSuffix
+	}
+
+	return encrypted
 }
 
 // EncryptDirName encrypts a directory path
@@ -650,23 +652,50 @@ func (c *Cipher) decryptFileName(in string) (string, error) {
 }
 
 // DecryptFileName decrypts a file path
-func (c *Cipher) DecryptFileName(in string) (string, error) {
-	if c.mode == NameEncryptionOff {
-		remainingLength := len(in) - len(c.encryptedSuffix)
-		if remainingLength == 0 || !strings.HasSuffix(in, c.encryptedSuffix) {
-			return "", ErrorNotAnEncryptedFile
+// Detects cipher version using suffix
+func (c *Cipher) DecryptFileName(in string) (string, string, error) {
+
+	var cipherVersion string
+	var expectedSuffix string
+	if strings.HasSuffix(in, fileEncryptedSuffixV2) { // Detect version based on V2 suffix
+		cipherVersion = CipherVersionV2
+		expectedSuffix = fileEncryptedSuffixV2
+	} else {
+		cipherVersion = CipherVersionV1
+		expectedSuffix = c.encryptedSuffix
+	}
+
+	// Strip suffix
+	var suffixStripped string
+	if c.mode == NameEncryptionOff || cipherVersion == CipherVersionV2 {
+		remainingLength := len(in) - len(expectedSuffix)
+		if remainingLength == 0 || !strings.HasSuffix(in, expectedSuffix) {
+			return "", "", ErrorNotAnEncryptedFile
 		}
-		decrypted := in[:remainingLength]
-		if version.Match(decrypted) {
-			_, unversioned := version.Remove(decrypted)
+		suffixStripped = in[:remainingLength]
+	}
+
+	if c.mode == NameEncryptionOff {
+		if version.Match(suffixStripped) {
+			_, unversioned := version.Remove(suffixStripped)
 			if unversioned == "" {
-				return "", ErrorNotAnEncryptedFile
+				return "", "", ErrorNotAnEncryptedFile
 			}
 		}
 		// Leave the version string on, if it was there
-		return decrypted, nil
+		return suffixStripped, cipherVersion, nil
 	}
-	return c.decryptFileName(in)
+
+	if cipherVersion == CipherVersionV2 { // We've stripped the suffix, but we still need to decrypt the filepath
+		in = suffixStripped
+	}
+
+	decryptedFilePath, err := c.decryptFileName(in)
+	if err != nil {
+		return "", cipherVersion, err
+	}
+
+	return decryptedFilePath, cipherVersion, nil
 }
 
 // DecryptDirName decrypts a directory path
@@ -952,10 +981,6 @@ func (c *Cipher) newDecrypter(rc io.ReadCloser, customCek *cek, o *Object) (*dec
 		return nil, fh.finishAndClose(ErrorEncryptedBadMagic)
 	}
 
-	if o != nil { // Set cipher version on the object level
-		o.cipherVersion = fh.cipherVersion
-	}
-
 	offsetStart := getFileMagicSize(fh.cipherVersion)
 	offsetEnd := offsetStart + getFileNonceSize(fh.cipherVersion)
 	fh.nonce.fromBuf(readBuf[offsetStart:offsetEnd], getFileNonceSize(fh.cipherVersion))
@@ -1016,12 +1041,12 @@ func (c *Cipher) newDecrypterSeek(ctx context.Context, o *Object, open OpenRange
 		rc, err = open(ctx, 0, -1)
 	} else if offset == 0 {
 		// If no offset open the header + limit worth of the file
-		_, underlyingLimit, _, _ := calculateUnderlying(offset, limit, getFileHeaderSize(c.version)) // Is `c.version` (config) right value here? We get the actual value from decrypter couple lines below: `fh.cipherVersion`
-		rc, err = open(ctx, 0, int64(getFileHeaderSize(c.version))+underlyingLimit)                  // Check `c.version` vs `fh.cipherVersion`
+		_, underlyingLimit, _, _ := calculateUnderlying(offset, limit, getFileHeaderSize(c.version)) // Is `c.version` (config) right value here? We get the actual value from decrypter couple lines below: `fh.CipherVersion`
+		rc, err = open(ctx, 0, int64(getFileHeaderSize(c.version))+underlyingLimit)                  // Check `c.version` vs `fh.CipherVersion`
 		setLimit = true
 	} else {
 		// Otherwise just read the header to start with
-		rc, err = open(ctx, 0, int64(getFileHeaderSize(c.version))) // Check `c.version` vs `fh.cipherVersion`
+		rc, err = open(ctx, 0, int64(getFileHeaderSize(c.version))) // Check `c.version` vs `fh.CipherVersion`
 		doRangeSeek = true
 	}
 	if err != nil {
@@ -1360,32 +1385,6 @@ func (c *Cipher) DecryptedSize(size int64, cipherVersion string) (int64, error) 
 		}
 	}
 	decryptedSize += residue
-	return decryptedSize, nil
-}
-
-// DecryptedSizeExact calculates the size of the data when decrypted by issuing HTTP request
-func (c *Cipher) DecryptedSizeExact(o *Object) (int64, error) {
-	ctx := context.Background() // @TODO Can we use this context or do we need to pass somehow the context from the top
-
-	// Return cached
-	if o.decryptedSize != -1 {
-		return o.decryptedSize, nil
-	}
-
-	// Get cipher version
-	d, err := o.f.getDecrypter(ctx, o, nil)
-	if err != nil {
-		return 0, err
-	}
-
-	encryptedSize := o.Object.Size()
-	decryptedSize, err := c.DecryptedSize(encryptedSize, d.cipherVersion)
-	if err != nil {
-		return 0, err
-	}
-
-	// Cache decrypted size
-	o.decryptedSize = decryptedSize
 	return decryptedSize, nil
 }
 

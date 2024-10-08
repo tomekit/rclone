@@ -66,7 +66,7 @@ func init() {
 					Help:  "Very simple filename obfuscation.",
 				}, {
 					Value: "off",
-					Help:  "Don't encrypt the file names.\nAdds a \".bin\", or \"suffix\" extension only.",
+					Help:  "Don't encrypt the file names.\nAdds a \".bin\", \"2.bin\", or \"suffix\" extension only.",
 				},
 			},
 		}, {
@@ -183,7 +183,7 @@ length and if it's case sensitive.`,
 			Advanced: true,
 		}, {
 			Name: "suffix",
-			Help: `If this is set it will override the default suffix of ".bin".
+			Help: `(Deprecated) This parameter is valid for V1 cipher only. If this is set it will override the default suffix.
 
 Setting suffix to "none" will result in an empty suffix. This may be useful 
 when the path length is critical.`,
@@ -202,22 +202,6 @@ when the path length is critical.`,
 					{
 						Value: CipherVersionV2,
 						Help:  "(Experimental) Each file contents encrypted using separate encryption key. Truncation protection. Hash support. Has at least 55 bytes (40 bytes cek, 16 bytes hash, 1 byte shorter nonce) overhead over cipher V1.",
-					},
-				},
-				Advanced: true,
-			},
-			{
-				Name:    "exact_size",
-				Help:    `Detect object decrypted size by reading a header. This isn't normally needed except rare cases where user would like to migrate cipher versions.'`,
-				Default: false,
-				Examples: []fs.OptionExample{
-					{
-						Value: "true",
-						Help:  "Get size according to object's cipher version. Requires HTTP call for every object",
-					},
-					{
-						Value: "false",
-						Help:  "Get size according to cipher version configuration.",
 					},
 				},
 				Advanced: true,
@@ -250,13 +234,22 @@ func newCipherForConfig(opt *Options) (*Cipher, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	var suffix string
+	if opt.CipherVersion == CipherVersionV2 { // Shall we return an error if user sets non-default suffix? V2 crypt supports only its own suffix.
+		//	return nil, fmt.Errorf("V2 cipher version uses its own suffix '%s'. Remove suffix from the config and try again.", fileEncryptedSuffixV2)
+		suffix = fileEncryptedSuffixV2
+	} else {
+		suffix = opt.Suffix
+	}
+
 	cipher, err := newCipher(mode, password, salt, opt.DirectoryNameEncryption, enc, opt.CipherVersion)
 	if err != nil {
 		return nil, fmt.Errorf("failed to make cipher: %w", err)
 	}
-	cipher.setEncryptedSuffix(opt.Suffix)
+
+	cipher.setEncryptedSuffix(suffix)
 	cipher.setPassBadBlocks(opt.PassBadBlocks)
-	cipher.setExactSize(opt.ExactSize)
 	return cipher, nil
 }
 
@@ -363,7 +356,6 @@ type Options struct {
 	Suffix                  string `config:"suffix"`
 	StrictNames             bool   `config:"strict_names"`
 	CipherVersion           string `config:"cipher_version"`
-	ExactSize               bool   `config:"exact_size"`
 }
 
 // Fs represents a wrapped fs.Fs
@@ -400,7 +392,7 @@ func (f *Fs) String() string {
 // Encrypt an object file name to entries.
 func (f *Fs) add(entries *fs.DirEntries, obj fs.Object) error {
 	remote := obj.Remote()
-	decryptedRemote, err := f.cipher.DecryptFileName(remote)
+	decryptedRemote, _, err := f.cipher.DecryptFileName(remote)
 	if err != nil {
 		if f.opt.StrictNames {
 			return fmt.Errorf("%s: undecryptable file name detected: %v", remote, err)
@@ -823,7 +815,8 @@ func (f *Fs) EncryptFileName(fileName string) string {
 
 // DecryptFileName returns a decrypted file name
 func (f *Fs) DecryptFileName(encryptedFileName string) (string, error) {
-	return f.cipher.DecryptFileName(encryptedFileName)
+	decryptedFilePath, _, err := f.cipher.DecryptFileName(encryptedFileName)
+	return decryptedFilePath, err
 }
 
 // computeHashWithNonce takes the nonce and encrypts the contents of
@@ -996,7 +989,7 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 		case fs.EntryDirectory:
 			decrypted, err = f.cipher.DecryptDirName(path)
 		case fs.EntryObject:
-			decrypted, err = f.cipher.DecryptFileName(path)
+			decrypted, _, err = f.cipher.DecryptFileName(path)
 		default:
 			fs.Errorf(path, "crypt ChangeNotify: ignoring unknown EntryType %d", entryType)
 			return
@@ -1143,17 +1136,13 @@ func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[str
 // This decrypts the remote name and decrypts the data
 type Object struct {
 	fs.Object
-	f             *Fs
-	decryptedSize int64
-	cipherVersion string
+	f *Fs
 }
 
 func (f *Fs) newObject(o fs.Object) *Object {
 	return &Object{
-		Object:        o,
-		f:             f,
-		decryptedSize: -1,
-		cipherVersion: "",
+		Object: o,
+		f:      f,
 	}
 }
 
@@ -1173,7 +1162,7 @@ func (o *Object) String() string {
 // Remote returns the remote path
 func (o *Object) Remote() string {
 	remote := o.Object.Remote()
-	decryptedName, err := o.f.cipher.DecryptFileName(remote)
+	decryptedName, _, err := o.f.cipher.DecryptFileName(remote)
 	if err != nil {
 		fs.Debugf(remote, "Undecryptable file name: %v", err)
 		return remote
@@ -1185,20 +1174,13 @@ func (o *Object) Remote() string {
 func (o *Object) Size() int64 {
 	size := o.Object.Size()
 	if !o.f.opt.NoDataEncryption {
-		var err error
-		if o.f.opt.ExactSize && o.cipherVersion == "" { // Use `ExactSize` setting if cipherVersion isn't explicitly set on the object level. If cipherVersion is explicitly set, we deduce size correctly without reading file header.
-			size, err = o.f.cipher.DecryptedSizeExact(o)
-		} else {
-
-			var cipherVersion string
-			if o.cipherVersion != "" { // Explicit cipher version (set by newDecrypter) detected from magic bytes
-				cipherVersion = o.cipherVersion
-			} else { // Assume cipher version based on config. Might not be correct if existing object was encrypted using different cipher version than currently configured.
-				cipherVersion = o.f.cipher.version
-			}
-
-			size, err = o.f.cipher.DecryptedSize(size, cipherVersion)
+		cipherVersion, err := o.GetCipherVersion()
+		if err != nil {
+			cipherVersion = o.f.cipher.version // If can't get cipher version, assume from config
+			fs.Debugf(o, "Can't obtain cipher version: %v. Assuming: %v", err, cipherVersion)
 		}
+
+		size, err = o.f.cipher.DecryptedSize(size, cipherVersion)
 
 		if err != nil {
 			fs.Debugf(o, "Bad size for decrypt: %v", err)
@@ -1246,13 +1228,7 @@ func (o *Object) Hash(ctx context.Context, ht hash.Type) (string, error) {
 		return "", hash.ErrUnsupported
 	}
 
-	// We need to get the decrypted size, to workout the amount of blocks, so we can workout the nonce that was used to encrypt the hash.
-	var decryptedSize int64
-	if d.c.exactSize {
-		decryptedSize, err = o.f.cipher.DecryptedSizeExact(o)
-	} else {
-		decryptedSize, err = o.f.cipher.DecryptedSize(encryptedSize, d.cipherVersion)
-	}
+	decryptedSize, err := o.f.cipher.DecryptedSize(encryptedSize, d.cipherVersion)
 
 	if err != nil {
 		return "", err
@@ -1335,6 +1311,16 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	}
 	_, err := o.f.put(ctx, in, src, options, update)
 	return err
+}
+
+// GetCipherVersion gets the object cipher version by reading the filepath suffix
+func (o *Object) GetCipherVersion() (string, error) {
+	remote := o.Object.Remote()
+	_, cipherVersion, err := o.f.cipher.DecryptFileName(remote) // Get cipher version based on the filepath suffix
+	if err != nil {
+		return "", err
+	}
+	return cipherVersion, nil
 }
 
 // newDir returns a dir with the Name decrypted
