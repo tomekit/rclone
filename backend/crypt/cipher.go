@@ -22,6 +22,7 @@ import (
 	"github.com/rclone/rclone/backend/crypt/pkcs7"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
+	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/lib/readers"
 	"github.com/rclone/rclone/lib/version"
 	"github.com/rfjakob/eme"
@@ -889,12 +890,31 @@ func (fh *encrypter) finish(err error) (int, error) {
 
 // Encrypt data encrypts the data stream
 func (c *Cipher) encryptData(in io.Reader) (io.Reader, *encrypter, error) {
-	in, wrap := accounting.UnWrap(in) // unwrap the accounting off the Reader
-	out, err := c.newEncrypter(in, nil, nil)
+	var plaintextHasher *hash.MultiHasher
+	var wrappedIn io.Reader
+	var err error
+	if c.version == CipherVersionV2 {
+		wrappedIn, plaintextHasher, err = wrapReaderCalculatePlaintextHash(in)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to wrap the reader: %w", err)
+		}
+	} else {
+		wrappedIn = in
+	}
+
+	wrappedIn, wrap := accounting.UnWrap(wrappedIn) // unwrap the accounting off the Reader
+	out, err := c.newEncrypter(wrappedIn, nil, nil)
 	if err != nil {
 		return nil, nil, err
 	}
-	return wrap(out), out, nil // and wrap the accounting back on
+
+	wrappedIn = wrap(out) // and wrap the accounting back on
+
+	if c.version == CipherVersionV2 {
+		wrappedIn = wrapReaderAppendPlaintextHash(wrappedIn, plaintextHasher, out)
+	}
+
+	return wrappedIn, out, nil
 }
 
 // EncryptData encrypts the data stream

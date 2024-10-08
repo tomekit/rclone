@@ -535,26 +535,10 @@ func (f *Fs) put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options [
 		return o, err
 	}
 
-	var plaintextHasher *hash.MultiHasher
-	var wrappedIn io.Reader
-	var err error
-	if f.cipher.version == CipherVersionV2 {
-		wrappedIn, plaintextHasher, err = wrapReaderCalculatePlaintextHash(in)
-		if err != nil {
-			return nil, fmt.Errorf("failed to wrap the reader: %w", err)
-		}
-	} else {
-		wrappedIn = in
-	}
-
 	// Encrypt the data into wrappedIn
-	wrappedIn, encrypter, err := f.cipher.encryptData(wrappedIn)
+	wrappedIn, encrypter, err := f.cipher.encryptData(in)
 	if err != nil {
 		return nil, err
-	}
-
-	if f.cipher.version == CipherVersionV2 {
-		wrappedIn = wrapReaderAppendPlaintextHash(wrappedIn, plaintextHasher, encrypter)
 	}
 
 	// Find a hash the destination supports to compute a hash of
@@ -838,6 +822,7 @@ func (f *Fs) computeHashWithNonce(ctx context.Context, nonce nonce, cek cek, src
 	}
 	defer fs.CheckClose(in, &err)
 
+	// @TODO wrapReaderCalculatePlaintextHash and wrapReaderAppendPlaintextHash logic is already included inside `encryptData` function. We should probably modify: `computeHashWithNonce` so it uses `encryptData`.
 	var plaintextHasher *hash.MultiHasher
 	var wrappedIn io.Reader
 	if f.cipher.version == CipherVersionV2 {
