@@ -1226,7 +1226,7 @@ func (o *Object) Hash(ctx context.Context, ht hash.Type) (string, error) {
 	}
 
 	// After we've read nonce from the header, we need to calculate the nonce used to encrypt the last block of the file, from which we would then derive nonce used to encrypt the hash
-	totalBlocks := uint64(math.Ceil(float64(decryptedSize) / float64(blockSize)))
+	totalBlocks := uint64(math.Ceil(float64(decryptedSize) / float64(blockDataSize)))
 	d.nonce.add(totalBlocks)
 	d.nonce[len(d.nonce)-1] = lastBlockFlag
 
